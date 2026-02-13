@@ -2,7 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
-import { loadTrustConfig, getTrustLevel, getTrustLevelWithAnnotations, saveIntent, loadIntents, saveProposal, loadProposals, deleteProposal, recordAuthorship, getFileStatus, getProjectStatus, initializeCollab, scanProject, generateId, } from "./collab.js";
+import { loadTrustConfig, getTrustLevel, getTrustLevelWithAnnotations, saveIntent, loadIntents, saveProposal, loadProposals, deleteProposal, recordAuthorship, getFileStatus, getProjectStatus, initializeCollab, initializeCollabWithPolicies, getProjectStructure, generateId, } from "./collab.js";
 // ============================================
 // Server Setup
 // ============================================
@@ -193,27 +193,51 @@ Shows authorship breakdown, confidence scores, trust levels, and pending proposa
     },
     {
         name: "collab_scan_project",
-        description: `Scan the project to detect languages, frameworks, and suggest trust policies.
-Returns detected project type, languages, frameworks, and recommended trust policies.
-Use before collab_init to preview what policies will be created.`,
+        description: `Scan the project structure and return file tree for analysis.
+Returns the project's file structure, detected languages, and any existing configuration.
+Use this to understand the project layout before suggesting trust policies.
+The LLM should analyze the returned structure and determine appropriate trust levels.`,
         inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+                include_file_samples: {
+                    type: "boolean",
+                    description: "Include first few lines of key files to help understand their purpose",
+                },
+                max_files: {
+                    type: "number",
+                    description: "Maximum number of files to return (default: 200)",
+                },
+            },
             required: [],
         },
     },
     {
         name: "collab_init",
-        description: `Initialize collaboration tracking for the current project.
-Scans the project structure to detect languages and frameworks, then creates
-context-aware trust policies in .collab/trust.yaml.
-If trust.yaml already exists, returns scan results without overwriting.`,
+        description: `Initialize collaboration tracking with LLM-analyzed trust policies.
+Creates .collab/ directory structure. If policies are provided, uses those.
+Otherwise creates minimal defaults. Best used after collab_scan_project analysis.`,
         inputSchema: {
             type: "object",
             properties: {
-                skip_scan: {
-                    type: "boolean",
-                    description: "Skip project scanning and use generic defaults (not recommended)",
+                policies: {
+                    type: "array",
+                    description: "Trust policies determined by LLM analysis of project structure",
+                    items: {
+                        type: "object",
+                        properties: {
+                            pattern: { type: "string", description: "Glob pattern (e.g., '**/auth/**')" },
+                            trust: { type: "string", enum: ["AUTONOMOUS", "SUPERVISED", "SUGGEST_ONLY", "READ_ONLY"] },
+                            reason: { type: "string", description: "Why this trust level" },
+                            owner: { type: "string", description: "Optional owner/team" },
+                        },
+                        required: ["pattern", "trust", "reason"],
+                    },
+                },
+                default_trust: {
+                    type: "string",
+                    enum: ["AUTONOMOUS", "SUPERVISED", "SUGGEST_ONLY", "READ_ONLY"],
+                    description: "Default trust level for unmatched files (default: SUPERVISED)",
                 },
             },
             required: [],
@@ -428,29 +452,70 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
             }
             case "collab_scan_project": {
-                const scanResult = await scanProject(".");
+                const { include_file_samples, max_files } = args;
+                const structure = await getProjectStructure(".", {
+                    includeSamples: include_file_samples,
+                    maxFiles: max_files,
+                });
                 return {
                     content: [
                         {
                             type: "text",
                             text: JSON.stringify({
-                                detected_type: scanResult.detected_type,
-                                detected_languages: scanResult.detected_languages,
-                                detected_frameworks: scanResult.detected_frameworks,
-                                existing_trust_file: scanResult.existing_trust_file,
-                                suggested_policies_count: scanResult.suggested_policies.length,
-                                suggested_policies: scanResult.suggested_policies,
-                                message: scanResult.existing_trust_file
-                                    ? "Trust file already exists. Use collab_init to see current configuration."
-                                    : "Run collab_init to create .collab/trust.yaml with these policies.",
+                                file_tree: structure.file_tree,
+                                total_files: structure.files.length,
+                                directories: structure.directories,
+                                languages: structure.languages,
+                                frameworks: structure.frameworks,
+                                config_files: structure.config_files,
+                                file_samples: structure.file_samples,
+                                existing_trust_file: structure.existing_trust_file,
+                                existing_policies: structure.existing_policies,
+                                instructions: `Analyze this project structure and determine appropriate trust policies.
+For each directory or pattern, assign one of:
+- AUTONOMOUS: Safe to edit freely (tests, generated code, docs)
+- SUPERVISED: Default, proceed with caution
+- SUGGEST_ONLY: Requires proposal (core logic, APIs, configs)
+- READ_ONLY: Human only (security, crypto, secrets)
+
+Call collab_init with your recommended policies array.`,
                             }, null, 2),
                         },
                     ],
                 };
             }
             case "collab_init": {
-                const { skip_scan } = args;
-                const scanResult = await initializeCollab(!skip_scan);
+                const { policies, default_trust } = args;
+                // If policies provided, use the new LLM-driven init
+                if (policies && policies.length > 0) {
+                    const result = await initializeCollabWithPolicies({
+                        policies: policies,
+                        default_trust,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    status: result.created ? "initialized" : "already_exists",
+                                    message: result.message,
+                                    policies_count: result.policies_count,
+                                    policies: result.created ? policies : undefined,
+                                    next_steps: result.created ? [
+                                        "Review .collab/trust.yaml and adjust if needed",
+                                        "Add @collab annotations to sensitive functions",
+                                        "Use collab_check_trust before editing sensitive files",
+                                    ] : [
+                                        "Delete .collab/trust.yaml to reinitialize",
+                                        "Or edit it directly to modify policies",
+                                    ],
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                }
+                // Fallback to legacy scan-based init
+                const scanResult = await initializeCollab(true);
                 const response = {
                     status: "initialized",
                     message: "Collaboration tracking initialized. Created .collab/ directory.",

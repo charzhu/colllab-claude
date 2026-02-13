@@ -108,6 +108,21 @@ export interface ProjectStatus {
 }
 export declare function getFileStatus(filePath: string): Promise<FileStatus>;
 export declare function getProjectStatus(): Promise<ProjectStatus>;
+export interface ProjectStructure {
+    file_tree: string;
+    files: string[];
+    directories: string[];
+    languages: string[];
+    frameworks: string[];
+    config_files: string[];
+    file_samples: Record<string, string>;
+    existing_trust_file: boolean;
+    existing_policies?: TrustPolicy[];
+}
+export declare function getProjectStructure(rootDir?: string, options?: {
+    includeSamples?: boolean;
+    maxFiles?: number;
+}): Promise<ProjectStructure>;
 export interface ProjectScanResult {
     detected_type: string;
     detected_languages: string[];
@@ -117,3 +132,12 @@ export interface ProjectScanResult {
 }
 export declare function scanProject(rootDir?: string): Promise<ProjectScanResult>;
 export declare function initializeCollab(useProjectScan?: boolean): Promise<ProjectScanResult | null>;
+export interface InitOptions {
+    policies?: TrustPolicy[];
+    default_trust?: TrustLevel;
+}
+export declare function initializeCollabWithPolicies(options?: InitOptions): Promise<{
+    created: boolean;
+    policies_count: number;
+    message: string;
+}>;

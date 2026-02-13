@@ -700,7 +700,227 @@ export async function getProjectStatus(): Promise<ProjectStatus> {
 }
 
 // ============================================
-// Project Scanning
+// LLM-Friendly Project Scanning
+// ============================================
+
+export interface ProjectStructure {
+  file_tree: string;
+  files: string[];
+  directories: string[];
+  languages: string[];
+  frameworks: string[];
+  config_files: string[];
+  file_samples: Record<string, string>;
+  existing_trust_file: boolean;
+  existing_policies?: TrustPolicy[];
+}
+
+export async function getProjectStructure(
+  rootDir: string = ".",
+  options: { includeSamples?: boolean; maxFiles?: number } = {}
+): Promise<ProjectStructure> {
+  const { includeSamples = false, maxFiles = 200 } = options;
+
+  // Check if trust.yaml already exists
+  const trustPath = path.join(rootDir, COLLAB_DIR, TRUST_FILE);
+  const existingTrustFile = await fileExists(trustPath);
+  let existingPolicies: TrustPolicy[] | undefined;
+
+  if (existingTrustFile) {
+    const config = await loadTrustConfig();
+    existingPolicies = config.policies;
+  }
+
+  // Get all files in the project
+  const allFiles = await glob("**/*", {
+    cwd: rootDir,
+    ignore: [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.next/**",
+      "**/target/**",
+      "**/__pycache__/**",
+      "**/venv/**",
+      "**/.venv/**",
+      "**/vendor/**",
+      "**/*.lock",
+      "**/package-lock.json",
+      "**/yarn.lock",
+      "**/pnpm-lock.yaml",
+    ],
+    nodir: true,
+  });
+
+  // Limit files if needed
+  const files = allFiles.slice(0, maxFiles);
+
+  // Extract unique directories
+  const directories = [...new Set(files.map(f => {
+    const dir = path.dirname(f);
+    return dir === "." ? "" : dir;
+  }).filter(Boolean))].sort();
+
+  // Detect languages
+  const extensionMap: Record<string, string> = {
+    ".ts": "TypeScript", ".tsx": "TypeScript",
+    ".js": "JavaScript", ".jsx": "JavaScript",
+    ".py": "Python",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".java": "Java",
+    ".rb": "Ruby",
+    ".cs": "C#",
+    ".cpp": "C++", ".cc": "C++", ".cxx": "C++",
+    ".c": "C",
+    ".php": "PHP",
+    ".swift": "Swift",
+    ".kt": "Kotlin",
+    ".scala": "Scala",
+  };
+
+  const languages = [...new Set(files
+    .map(f => extensionMap[path.extname(f).toLowerCase()])
+    .filter(Boolean)
+  )];
+
+  // Detect frameworks from config files
+  const configFiles = files.filter(f =>
+    f.endsWith("package.json") ||
+    f.endsWith("requirements.txt") ||
+    f.endsWith("Gemfile") ||
+    f.endsWith("go.mod") ||
+    f.endsWith("Cargo.toml") ||
+    f.endsWith("pom.xml") ||
+    f.endsWith("build.gradle") ||
+    f.includes("next.config") ||
+    f.includes("nuxt.config") ||
+    f.endsWith("manage.py") ||
+    f.endsWith("tsconfig.json") ||
+    f.endsWith(".env.example")
+  );
+
+  // Detect frameworks
+  const frameworks: string[] = [];
+  for (const configFile of configFiles) {
+    if (configFile.endsWith("package.json")) {
+      try {
+        const content = await fs.readFile(path.join(rootDir, configFile), "utf-8");
+        const pkg = JSON.parse(content);
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        if (deps["next"]) frameworks.push("Next.js");
+        if (deps["express"]) frameworks.push("Express");
+        if (deps["fastify"]) frameworks.push("Fastify");
+        if (deps["@nestjs/core"]) frameworks.push("NestJS");
+        if (deps["react"] && !deps["next"]) frameworks.push("React");
+        if (deps["vue"]) frameworks.push("Vue");
+        if (deps["@angular/core"]) frameworks.push("Angular");
+        if (deps["svelte"]) frameworks.push("Svelte");
+      } catch { /* ignore */ }
+    }
+    if (configFile.endsWith("manage.py")) frameworks.push("Django");
+    if (configFile.includes("next.config")) frameworks.push("Next.js");
+    if (configFile.endsWith("Gemfile")) frameworks.push("Ruby/Rails");
+  }
+
+  // Build a visual file tree for LLM understanding
+  const tree = buildFileTree(files);
+
+  // Get file samples if requested
+  const fileSamples: Record<string, string> = {};
+  if (includeSamples) {
+    // Sample key files that help understand project structure
+    const sampleCandidates = files.filter(f =>
+      f.endsWith("README.md") ||
+      f.endsWith("package.json") ||
+      f.includes("/auth/") ||
+      f.includes("/security/") ||
+      f.includes("/core/") ||
+      f.includes("/api/") ||
+      f.includes("/routes/") ||
+      f.includes("/models/") ||
+      f.includes("/controllers/")
+    ).slice(0, 10);
+
+    for (const file of sampleCandidates) {
+      try {
+        const content = await fs.readFile(path.join(rootDir, file), "utf-8");
+        // Get first 20 lines
+        const lines = content.split("\n").slice(0, 20);
+        fileSamples[file] = lines.join("\n") + (content.split("\n").length > 20 ? "\n..." : "");
+      } catch { /* ignore */ }
+    }
+  }
+
+  return {
+    file_tree: tree,
+    files,
+    directories,
+    languages: [...new Set(frameworks.concat(languages))],
+    frameworks: [...new Set(frameworks)],
+    config_files: configFiles,
+    file_samples: fileSamples,
+    existing_trust_file: existingTrustFile,
+    existing_policies: existingPolicies,
+  };
+}
+
+function buildFileTree(files: string[]): string {
+  const tree: Record<string, any> = {};
+
+  for (const file of files) {
+    const parts = file.split(/[/\\]/);
+    let current = tree;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (i === parts.length - 1) {
+        // It's a file
+        current[part] = null;
+      } else {
+        // It's a directory
+        if (!current[part]) {
+          current[part] = {};
+        }
+        current = current[part];
+      }
+    }
+  }
+
+  // Convert to string representation
+  function stringify(obj: Record<string, any>, indent: string = ""): string {
+    const lines: string[] = [];
+    const entries = Object.entries(obj).sort(([a], [b]) => {
+      // Directories first
+      const aIsDir = obj[a] !== null;
+      const bIsDir = obj[b] !== null;
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+      return a.localeCompare(b);
+    });
+
+    for (let i = 0; i < entries.length; i++) {
+      const [name, value] = entries[i];
+      const isLast = i === entries.length - 1;
+      const prefix = isLast ? "└── " : "├── ";
+      const childIndent = indent + (isLast ? "    " : "│   ");
+
+      if (value === null) {
+        lines.push(indent + prefix + name);
+      } else {
+        lines.push(indent + prefix + name + "/");
+        lines.push(stringify(value, childIndent));
+      }
+    }
+
+    return lines.filter(Boolean).join("\n");
+  }
+
+  return stringify(tree);
+}
+
+// ============================================
+// Legacy Project Scanning (for backwards compatibility)
 // ============================================
 
 export interface ProjectScanResult {
@@ -1043,4 +1263,65 @@ export async function initializeCollab(useProjectScan: boolean = true): Promise<
   }
 
   return scanResult;
+}
+
+// New LLM-driven initialization
+export interface InitOptions {
+  policies?: TrustPolicy[];
+  default_trust?: TrustLevel;
+}
+
+export async function initializeCollabWithPolicies(options: InitOptions = {}): Promise<{
+  created: boolean;
+  policies_count: number;
+  message: string;
+}> {
+  // Create directory structure
+  await ensureCollabDir();
+  await ensureCollabDir(META_DIR);
+  await ensureCollabDir(INTENTS_DIR);
+  await ensureCollabDir(PROPOSALS_DIR);
+
+  const trustPath = path.join(COLLAB_DIR, TRUST_FILE);
+  const exists = await fileExists(trustPath);
+
+  if (exists) {
+    return {
+      created: false,
+      policies_count: 0,
+      message: "Trust configuration already exists. Delete .collab/trust.yaml to reinitialize.",
+    };
+  }
+
+  // Use provided policies or minimal defaults
+  const policies = options.policies || [
+    { pattern: "**/test/**", trust: "AUTONOMOUS" as TrustLevel, reason: "Test files" },
+    { pattern: "**/*.test.*", trust: "AUTONOMOUS" as TrustLevel, reason: "Test files" },
+  ];
+
+  const config: TrustConfig = {
+    default_trust: options.default_trust || "SUPERVISED",
+    policies,
+    regions: [],
+  };
+
+  await saveTrustConfig(config);
+
+  // Create config.yaml if it doesn't exist
+  const configPath = path.join(COLLAB_DIR, CONFIG_FILE);
+  if (!(await fileExists(configPath))) {
+    const defaultConfig = {
+      version: "1.0",
+      confidence_threshold: 0.7,
+      auto_record_authorship: true,
+      model: "claude-opus-4"
+    };
+    await fs.writeFile(configPath, yaml.stringify(defaultConfig));
+  }
+
+  return {
+    created: true,
+    policies_count: policies.length,
+    message: `Created .collab/trust.yaml with ${policies.length} policies.`,
+  };
 }
