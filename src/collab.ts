@@ -696,47 +696,322 @@ export async function getProjectStatus(): Promise<ProjectStatus> {
 }
 
 // ============================================
+// Project Scanning
+// ============================================
+
+export interface ProjectScanResult {
+  detected_type: string;
+  detected_languages: string[];
+  detected_frameworks: string[];
+  suggested_policies: TrustPolicy[];
+  existing_trust_file: boolean;
+}
+
+interface ProjectPattern {
+  pattern: string;
+  trust: TrustLevel;
+  reason: string;
+  condition: (files: string[]) => boolean;
+}
+
+// Common patterns for different project types
+const COMMON_PATTERNS: ProjectPattern[] = [
+  // Test files - AUTONOMOUS
+  { pattern: "**/test/**", trust: "AUTONOMOUS", reason: "Test files can be freely modified", condition: () => true },
+  { pattern: "**/tests/**", trust: "AUTONOMOUS", reason: "Test files can be freely modified", condition: () => true },
+  { pattern: "**/__tests__/**", trust: "AUTONOMOUS", reason: "Test files can be freely modified", condition: () => true },
+  { pattern: "**/*.test.*", trust: "AUTONOMOUS", reason: "Test files can be freely modified", condition: () => true },
+  { pattern: "**/*.spec.*", trust: "AUTONOMOUS", reason: "Test files can be freely modified", condition: () => true },
+  { pattern: "**/*_test.go", trust: "AUTONOMOUS", reason: "Go test files can be freely modified", condition: (files) => files.some(f => f.endsWith(".go")) },
+  { pattern: "**/*_test.py", trust: "AUTONOMOUS", reason: "Python test files can be freely modified", condition: (files) => files.some(f => f.endsWith(".py")) },
+
+  // Generated files - AUTONOMOUS
+  { pattern: "**/generated/**", trust: "AUTONOMOUS", reason: "Auto-generated code, can be regenerated", condition: () => true },
+  { pattern: "**/dist/**", trust: "AUTONOMOUS", reason: "Build output, can be regenerated", condition: () => true },
+  { pattern: "**/build/**", trust: "AUTONOMOUS", reason: "Build output, can be regenerated", condition: () => true },
+  { pattern: "**/.next/**", trust: "AUTONOMOUS", reason: "Next.js build output", condition: (files) => files.some(f => f.includes("next.config")) },
+
+  // Security - READ_ONLY
+  { pattern: "**/security/**", trust: "READ_ONLY", reason: "Security-critical code requires human review", condition: () => true },
+  { pattern: "**/auth/**", trust: "SUGGEST_ONLY", reason: "Authentication code requires careful review", condition: () => true },
+  { pattern: "**/crypto/**", trust: "READ_ONLY", reason: "Cryptographic code requires human review", condition: () => true },
+
+  // Core business logic - SUGGEST_ONLY
+  { pattern: "**/core/**", trust: "SUGGEST_ONLY", reason: "Core business logic requires review", condition: () => true },
+  { pattern: "**/domain/**", trust: "SUGGEST_ONLY", reason: "Domain logic requires review", condition: () => true },
+
+  // Infrastructure - SUGGEST_ONLY
+  { pattern: "**/infra/**", trust: "SUGGEST_ONLY", reason: "Infrastructure code requires review", condition: () => true },
+  { pattern: "**/infrastructure/**", trust: "SUGGEST_ONLY", reason: "Infrastructure code requires review", condition: () => true },
+  { pattern: "**/migrations/**", trust: "SUGGEST_ONLY", reason: "Database migrations require careful review", condition: () => true },
+
+  // Config files - READ_ONLY for sensitive ones
+  { pattern: "**/.env*", trust: "READ_ONLY", reason: "Environment files may contain secrets", condition: () => true },
+  { pattern: "**/secrets/**", trust: "READ_ONLY", reason: "Secret files must not be modified by AI", condition: () => true },
+];
+
+// Framework-specific patterns
+const FRAMEWORK_PATTERNS: Record<string, ProjectPattern[]> = {
+  nextjs: [
+    { pattern: "app/**/layout.*", trust: "SUGGEST_ONLY", reason: "Next.js layouts affect multiple pages", condition: () => true },
+    { pattern: "app/**/page.*", trust: "SUPERVISED", reason: "Next.js pages", condition: () => true },
+    { pattern: "middleware.*", trust: "SUGGEST_ONLY", reason: "Middleware affects all requests", condition: () => true },
+  ],
+  express: [
+    { pattern: "**/middleware/**", trust: "SUGGEST_ONLY", reason: "Express middleware affects request handling", condition: () => true },
+    { pattern: "**/routes/**", trust: "SUPERVISED", reason: "API routes", condition: () => true },
+  ],
+  django: [
+    { pattern: "**/settings/**", trust: "SUGGEST_ONLY", reason: "Django settings affect entire application", condition: () => true },
+    { pattern: "**/models.py", trust: "SUGGEST_ONLY", reason: "Django models define database schema", condition: () => true },
+    { pattern: "**/migrations/**", trust: "SUGGEST_ONLY", reason: "Django migrations modify database", condition: () => true },
+  ],
+  spring: [
+    { pattern: "**/config/**", trust: "SUGGEST_ONLY", reason: "Spring configuration", condition: () => true },
+    { pattern: "**/*Config.java", trust: "SUGGEST_ONLY", reason: "Spring configuration classes", condition: () => true },
+    { pattern: "**/*Security*.java", trust: "READ_ONLY", reason: "Spring Security configuration", condition: () => true },
+  ],
+  rails: [
+    { pattern: "config/**", trust: "SUGGEST_ONLY", reason: "Rails configuration", condition: () => true },
+    { pattern: "db/migrate/**", trust: "SUGGEST_ONLY", reason: "Rails migrations modify database", condition: () => true },
+    { pattern: "app/models/**", trust: "SUGGEST_ONLY", reason: "Rails models define database schema", condition: () => true },
+  ],
+};
+
+async function detectProjectType(files: string[]): Promise<{
+  type: string;
+  languages: string[];
+  frameworks: string[];
+}> {
+  const languages = new Set<string>();
+  const frameworks = new Set<string>();
+  let type = "unknown";
+
+  // Detect languages by file extensions
+  const extensionMap: Record<string, string> = {
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".py": "python",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".rb": "ruby",
+    ".cs": "csharp",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".php": "php",
+  };
+
+  for (const file of files) {
+    const ext = path.extname(file).toLowerCase();
+    if (extensionMap[ext]) {
+      languages.add(extensionMap[ext]);
+    }
+  }
+
+  // Detect frameworks by specific files
+  const frameworkIndicators: Record<string, string[]> = {
+    nextjs: ["next.config.js", "next.config.mjs", "next.config.ts"],
+    express: ["express"],  // Will check package.json
+    react: ["react"],  // Will check package.json
+    vue: ["vue.config.js", "nuxt.config.js", "nuxt.config.ts"],
+    django: ["manage.py", "settings.py"],
+    flask: ["flask"],  // Will check requirements.txt
+    spring: ["pom.xml", "build.gradle"],
+    rails: ["Gemfile", "config/routes.rb"],
+    gin: ["gin"],  // Will check go.mod
+  };
+
+  // Check for framework indicator files
+  for (const [framework, indicators] of Object.entries(frameworkIndicators)) {
+    for (const indicator of indicators) {
+      if (files.some(f => f.endsWith(indicator) || f.includes(indicator))) {
+        frameworks.add(framework);
+      }
+    }
+  }
+
+  // Check package.json for JS frameworks
+  if (files.some(f => f.endsWith("package.json"))) {
+    try {
+      const pkgPath = files.find(f => f.endsWith("package.json") && !f.includes("node_modules"));
+      if (pkgPath) {
+        const content = await fs.readFile(pkgPath, "utf-8");
+        const pkg = JSON.parse(content);
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+
+        if (deps["next"]) frameworks.add("nextjs");
+        if (deps["express"]) frameworks.add("express");
+        if (deps["react"]) frameworks.add("react");
+        if (deps["vue"]) frameworks.add("vue");
+        if (deps["@angular/core"]) frameworks.add("angular");
+        if (deps["fastify"]) frameworks.add("fastify");
+        if (deps["nestjs"] || deps["@nestjs/core"]) frameworks.add("nestjs");
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  // Determine project type
+  if (frameworks.has("nextjs") || frameworks.has("react") || frameworks.has("vue") || frameworks.has("angular")) {
+    type = "web-frontend";
+  } else if (frameworks.has("express") || frameworks.has("fastify") || frameworks.has("nestjs")) {
+    type = "node-backend";
+  } else if (frameworks.has("django") || frameworks.has("flask")) {
+    type = "python-backend";
+  } else if (frameworks.has("spring")) {
+    type = "java-backend";
+  } else if (frameworks.has("rails")) {
+    type = "ruby-backend";
+  } else if (languages.has("go")) {
+    type = "go-backend";
+  } else if (languages.has("rust")) {
+    type = "rust";
+  } else if (languages.size > 0) {
+    type = Array.from(languages)[0];
+  }
+
+  return {
+    type,
+    languages: Array.from(languages),
+    frameworks: Array.from(frameworks),
+  };
+}
+
+export async function scanProject(rootDir: string = "."): Promise<ProjectScanResult> {
+  // Check if trust.yaml already exists
+  const trustPath = path.join(rootDir, COLLAB_DIR, TRUST_FILE);
+  const existingTrustFile = await fileExists(trustPath);
+
+  // Get all files in the project (excluding common ignore patterns)
+  const files = await glob("**/*", {
+    cwd: rootDir,
+    ignore: [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.next/**",
+      "**/target/**",
+      "**/__pycache__/**",
+      "**/venv/**",
+      "**/.venv/**",
+      "**/vendor/**",
+    ],
+    nodir: true,
+  });
+
+  // Detect project type
+  const { type, languages, frameworks } = await detectProjectType(files);
+
+  // Build suggested policies
+  const suggestedPolicies: TrustPolicy[] = [];
+  const addedPatterns = new Set<string>();
+
+  // Add common patterns that match
+  for (const pattern of COMMON_PATTERNS) {
+    if (pattern.condition(files) && !addedPatterns.has(pattern.pattern)) {
+      // Check if any files match this pattern
+      const matchingFiles = await glob(pattern.pattern, { cwd: rootDir, nodir: true, ignore: ["**/node_modules/**"] });
+      if (matchingFiles.length > 0 || pattern.pattern.includes("**/test/**") || pattern.pattern.includes("**/security/**")) {
+        suggestedPolicies.push({
+          pattern: pattern.pattern,
+          trust: pattern.trust,
+          reason: pattern.reason,
+        });
+        addedPatterns.add(pattern.pattern);
+      }
+    }
+  }
+
+  // Add framework-specific patterns
+  for (const framework of frameworks) {
+    const frameworkPatterns = FRAMEWORK_PATTERNS[framework];
+    if (frameworkPatterns) {
+      for (const pattern of frameworkPatterns) {
+        if (!addedPatterns.has(pattern.pattern)) {
+          suggestedPolicies.push({
+            pattern: pattern.pattern,
+            trust: pattern.trust,
+            reason: pattern.reason,
+          });
+          addedPatterns.add(pattern.pattern);
+        }
+      }
+    }
+  }
+
+  // Sort policies by trust level priority (READ_ONLY first, then SUGGEST_ONLY, etc.)
+  const trustOrder: Record<TrustLevel, number> = {
+    READ_ONLY: 0,
+    SUGGEST_ONLY: 1,
+    SUPERVISED: 2,
+    AUTONOMOUS: 3,
+  };
+
+  suggestedPolicies.sort((a, b) => trustOrder[a.trust] - trustOrder[b.trust]);
+
+  return {
+    detected_type: type,
+    detected_languages: languages,
+    detected_frameworks: frameworks,
+    suggested_policies: suggestedPolicies,
+    existing_trust_file: existingTrustFile,
+  };
+}
+
+// ============================================
 // Initialization
 // ============================================
 
-export async function initializeCollab(): Promise<void> {
+export async function initializeCollab(useProjectScan: boolean = true): Promise<ProjectScanResult | null> {
   // Create directory structure
   await ensureCollabDir();
   await ensureCollabDir(META_DIR);
   await ensureCollabDir(INTENTS_DIR);
   await ensureCollabDir(PROPOSALS_DIR);
 
+  let scanResult: ProjectScanResult | null = null;
+
   // Create default trust.yaml if it doesn't exist
   const trustPath = path.join(COLLAB_DIR, TRUST_FILE);
   if (!(await fileExists(trustPath))) {
-    const defaultConfig: TrustConfig = {
+    let policies: TrustPolicy[];
+
+    if (useProjectScan) {
+      // Scan project and generate context-aware policies
+      scanResult = await scanProject(".");
+      policies = scanResult.suggested_policies.length > 0
+        ? scanResult.suggested_policies
+        : [
+            // Fallback to defaults if no patterns matched
+            { pattern: "**/generated/**", trust: "AUTONOMOUS", reason: "Auto-generated code" },
+            { pattern: "**/test/**", trust: "AUTONOMOUS", reason: "Test files" },
+            { pattern: "**/*.test.*", trust: "AUTONOMOUS", reason: "Test files" },
+            { pattern: "**/security/**", trust: "READ_ONLY", reason: "Security-critical code" },
+          ];
+    } else {
+      policies = [
+        { pattern: "**/generated/**", trust: "AUTONOMOUS", reason: "Auto-generated code, can be regenerated" },
+        { pattern: "**/test/**", trust: "AUTONOMOUS", reason: "Test files can be freely modified" },
+        { pattern: "**/*.test.*", trust: "AUTONOMOUS", reason: "Test files can be freely modified" },
+        { pattern: "**/security/**", trust: "READ_ONLY", reason: "Security-critical code requires human modification" },
+      ];
+    }
+
+    const config: TrustConfig = {
       default_trust: "SUPERVISED",
-      policies: [
-        {
-          pattern: "**/generated/**",
-          trust: "AUTONOMOUS",
-          reason: "Auto-generated code, can be regenerated"
-        },
-        {
-          pattern: "**/test/**",
-          trust: "AUTONOMOUS",
-          reason: "Test files can be freely modified"
-        },
-        {
-          pattern: "**/*.test.*",
-          trust: "AUTONOMOUS",
-          reason: "Test files can be freely modified"
-        },
-        {
-          pattern: "**/security/**",
-          trust: "READ_ONLY",
-          reason: "Security-critical code requires human modification"
-        }
-      ],
-      regions: []
+      policies,
+      regions: [],
     };
 
-    await saveTrustConfig(defaultConfig);
+    await saveTrustConfig(config);
+  } else if (useProjectScan) {
+    // Even if trust file exists, scan to return info
+    scanResult = await scanProject(".");
   }
 
   // Create config.yaml if it doesn't exist
@@ -751,4 +1026,6 @@ export async function initializeCollab(): Promise<void> {
 
     await fs.writeFile(configPath, yaml.stringify(defaultConfig));
   }
+
+  return scanResult;
 }

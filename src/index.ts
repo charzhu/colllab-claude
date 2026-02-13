@@ -21,6 +21,7 @@ import {
   getFileStatus,
   getProjectStatus,
   initializeCollab,
+  scanProject,
   generateId,
   TrustLevel,
 } from "./collab.js";
@@ -220,12 +221,30 @@ Shows authorship breakdown, confidence scores, trust levels, and pending proposa
     },
   },
   {
-    name: "collab_init",
-    description: `Initialize collaboration tracking for the current project.
-Creates .collab/ directory with default trust policies and configuration.`,
+    name: "collab_scan_project",
+    description: `Scan the project to detect languages, frameworks, and suggest trust policies.
+Returns detected project type, languages, frameworks, and recommended trust policies.
+Use before collab_init to preview what policies will be created.`,
     inputSchema: {
       type: "object" as const,
       properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "collab_init",
+    description: `Initialize collaboration tracking for the current project.
+Scans the project structure to detect languages and frameworks, then creates
+context-aware trust policies in .collab/trust.yaml.
+If trust.yaml already exists, returns scan results without overwriting.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        skip_scan: {
+          type: "boolean",
+          description: "Skip project scanning and use generic defaults (not recommended)",
+        },
+      },
       required: [],
     },
   },
@@ -513,8 +532,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      case "collab_init": {
-        await initializeCollab();
+      case "collab_scan_project": {
+        const scanResult = await scanProject(".");
 
         return {
           content: [
@@ -522,17 +541,61 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: JSON.stringify(
                 {
-                  status: "initialized",
-                  message: "Collaboration tracking initialized. Created .collab/ directory with default trust policies.",
-                  next_steps: [
-                    "Edit .collab/trust.yaml to customize trust policies",
-                    "Add collaboration guidelines to CLAUDE.md",
-                    "Use collab_check_trust before editing sensitive files",
-                  ],
+                  detected_type: scanResult.detected_type,
+                  detected_languages: scanResult.detected_languages,
+                  detected_frameworks: scanResult.detected_frameworks,
+                  existing_trust_file: scanResult.existing_trust_file,
+                  suggested_policies_count: scanResult.suggested_policies.length,
+                  suggested_policies: scanResult.suggested_policies,
+                  message: scanResult.existing_trust_file
+                    ? "Trust file already exists. Use collab_init to see current configuration."
+                    : "Run collab_init to create .collab/trust.yaml with these policies.",
                 },
                 null,
                 2
               ),
+            },
+          ],
+        };
+      }
+
+      case "collab_init": {
+        const { skip_scan } = args as { skip_scan?: boolean };
+        const scanResult = await initializeCollab(!skip_scan);
+
+        const response: Record<string, unknown> = {
+          status: "initialized",
+          message: "Collaboration tracking initialized. Created .collab/ directory.",
+        };
+
+        if (scanResult) {
+          response.detected_type = scanResult.detected_type;
+          response.detected_languages = scanResult.detected_languages;
+          response.detected_frameworks = scanResult.detected_frameworks;
+          response.policies_created = scanResult.suggested_policies.length;
+
+          if (scanResult.existing_trust_file) {
+            response.note = "Trust file already existed, kept existing configuration.";
+          } else {
+            response.policies = scanResult.suggested_policies.map(p => ({
+              pattern: p.pattern,
+              trust: p.trust,
+              reason: p.reason,
+            }));
+          }
+        }
+
+        response.next_steps = [
+          "Review .collab/trust.yaml and adjust policies as needed",
+          "Add collaboration guidelines to CLAUDE.md",
+          "Use collab_check_trust before editing sensitive files",
+        ];
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(response, null, 2),
             },
           ],
         };

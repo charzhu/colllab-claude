@@ -108,4 +108,12 @@ export interface ProjectStatus {
 }
 export declare function getFileStatus(filePath: string): Promise<FileStatus>;
 export declare function getProjectStatus(): Promise<ProjectStatus>;
-export declare function initializeCollab(): Promise<void>;
+export interface ProjectScanResult {
+    detected_type: string;
+    detected_languages: string[];
+    detected_frameworks: string[];
+    suggested_policies: TrustPolicy[];
+    existing_trust_file: boolean;
+}
+export declare function scanProject(rootDir?: string): Promise<ProjectScanResult>;
+export declare function initializeCollab(useProjectScan?: boolean): Promise<ProjectScanResult | null>;
