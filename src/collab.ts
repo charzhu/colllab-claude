@@ -127,16 +127,19 @@ export async function fileExists(filePath: string): Promise<boolean> {
 // Annotation Parsing
 // ============================================
 
-const ANNOTATION_PATTERN = /(?:\/\/|#|\/\*\*?)\s*@collab(?::begin|:end)?\s+(.+?)(?:\*\/)?$/;
-const BLOCK_BEGIN_PATTERN = /@collab:begin\s+(.+)/;
-const BLOCK_END_PATTERN = /@collab:end/;
+// Note: These patterns should NOT have global flag to avoid lastIndex issues
+const ANNOTATION_REGEX = /(?:\/\/|#|\/\*\*?)\s*@collab(?::begin|:end)?\s+(.+?)(?:\*\/)?$/;
+const BLOCK_BEGIN_REGEX = /@collab:begin\s+(.+)/;
+const BLOCK_END_REGEX = /@collab:end/;
 const ATTR_PATTERN = /(\w+)=(?:"([^"]+)"|'([^']+)'|\[([^\]]+)\]|(\S+))/g;
 
 function parseAttributes(attrString: string): Partial<ParsedAnnotation> {
   const result: Partial<ParsedAnnotation> = {};
+  // Create a new regex instance each time to avoid lastIndex issues with global flag
+  const attrRegex = /(\w+)=(?:"([^"]+)"|'([^']+)'|\[([^\]]+)\]|(\S+))/g;
   let match: RegExpExecArray | null;
 
-  while ((match = ATTR_PATTERN.exec(attrString)) !== null) {
+  while ((match = attrRegex.exec(attrString)) !== null) {
     const key = match[1];
     const value = match[2] || match[3] || match[5]; // quoted or unquoted
     const arrayValue = match[4]; // array value
@@ -248,7 +251,8 @@ export async function parseAnnotations(filePath: string): Promise<ParsedAnnotati
 
   try {
     const content = await fs.readFile(filePath, "utf-8");
-    const lines = content.split("\n");
+    // Normalize line endings - handle both CRLF and LF
+    const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     const fileExt = getFileExtension(filePath);
 
     let i = 0;
@@ -256,7 +260,7 @@ export async function parseAnnotations(filePath: string): Promise<ParsedAnnotati
       const line = lines[i];
 
       // Check for block begin
-      const blockBeginMatch = BLOCK_BEGIN_PATTERN.exec(line);
+      const blockBeginMatch = BLOCK_BEGIN_REGEX.exec(line);
       if (blockBeginMatch) {
         const attrs = parseAttributes(blockBeginMatch[1]);
         const blockStart = i + 1; // 1-indexed
@@ -264,7 +268,7 @@ export async function parseAnnotations(filePath: string): Promise<ParsedAnnotati
         // Find matching block end
         let blockEnd = blockStart;
         for (let j = i + 1; j < lines.length; j++) {
-          if (BLOCK_END_PATTERN.test(lines[j])) {
+          if (BLOCK_END_REGEX.test(lines[j])) {
             blockEnd = j; // Line before @collab:end
             i = j;
             break;
@@ -281,8 +285,8 @@ export async function parseAnnotations(filePath: string): Promise<ParsedAnnotati
       }
 
       // Check for single-line annotation
-      const match = ANNOTATION_PATTERN.exec(line);
-      if (match && !BLOCK_END_PATTERN.test(line)) {
+      const match = ANNOTATION_REGEX.exec(line);
+      if (match && !BLOCK_END_REGEX.test(line)) {
         const attrs = parseAttributes(match[1]);
 
         // Collect consecutive @collab lines (multi-line annotation)
@@ -290,8 +294,8 @@ export async function parseAnnotations(filePath: string): Promise<ParsedAnnotati
         let lastAnnotationLine = i;
 
         for (let j = i + 1; j < lines.length; j++) {
-          const nextMatch = ANNOTATION_PATTERN.exec(lines[j]);
-          if (nextMatch && !BLOCK_BEGIN_PATTERN.test(lines[j]) && !BLOCK_END_PATTERN.test(lines[j])) {
+          const nextMatch = ANNOTATION_REGEX.exec(lines[j]);
+          if (nextMatch && !BLOCK_BEGIN_REGEX.test(lines[j]) && !BLOCK_END_REGEX.test(lines[j])) {
             const nextAttrs = parseAttributes(nextMatch[1]);
             Object.assign(collectedAttrs, nextAttrs);
             lastAnnotationLine = j;
@@ -727,8 +731,11 @@ const COMMON_PATTERNS: ProjectPattern[] = [
 
   // Generated files - AUTONOMOUS
   { pattern: "**/generated/**", trust: "AUTONOMOUS", reason: "Auto-generated code, can be regenerated", condition: () => true },
+  { pattern: "generated/**", trust: "AUTONOMOUS", reason: "Auto-generated code, can be regenerated", condition: () => true },
   { pattern: "**/dist/**", trust: "AUTONOMOUS", reason: "Build output, can be regenerated", condition: () => true },
+  { pattern: "dist/**", trust: "AUTONOMOUS", reason: "Build output, can be regenerated", condition: () => true },
   { pattern: "**/build/**", trust: "AUTONOMOUS", reason: "Build output, can be regenerated", condition: () => true },
+  { pattern: "build/**", trust: "AUTONOMOUS", reason: "Build output, can be regenerated", condition: () => true },
   { pattern: "**/.next/**", trust: "AUTONOMOUS", reason: "Next.js build output", condition: (files) => files.some(f => f.includes("next.config")) },
 
   // Security - READ_ONLY
@@ -916,7 +923,15 @@ export async function scanProject(rootDir: string = "."): Promise<ProjectScanRes
     if (pattern.condition(files) && !addedPatterns.has(pattern.pattern)) {
       // Check if any files match this pattern
       const matchingFiles = await glob(pattern.pattern, { cwd: rootDir, nodir: true, ignore: ["**/node_modules/**"] });
-      if (matchingFiles.length > 0 || pattern.pattern.includes("**/test/**") || pattern.pattern.includes("**/security/**")) {
+
+      // Always include certain critical patterns even if no files match yet
+      const alwaysIncludePatterns = [
+        "**/test/**", "**/tests/**", "**/security/**", "**/crypto/**",
+        "**/generated/**", "**/auth/**", "**/core/**", "**/.env*"
+      ];
+      const shouldAlwaysInclude = alwaysIncludePatterns.some(p => pattern.pattern === p);
+
+      if (matchingFiles.length > 0 || shouldAlwaysInclude) {
         suggestedPolicies.push({
           pattern: pattern.pattern,
           trust: pattern.trust,
