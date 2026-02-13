@@ -22,7 +22,7 @@ Based on the project structure, determine appropriate trust levels for each dire
 - Test directories (`test/`, `tests/`, `__tests__/`, `spec/`)
 - Test files (`*.test.*`, `*.spec.*`, `*_test.go`, `test_*.py`)
 - Generated/build output (`generated/`, `dist/`, `build/`, `.next/`)
-- Documentation (`docs/`, `*.md` except README)
+- Pure documentation (`docs/README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`)
 - Mock/fixture data (`fixtures/`, `mocks/`, `__mocks__/`)
 
 **SUPERVISED** (default - proceed with caution):
@@ -36,6 +36,7 @@ Based on the project structure, determine appropriate trust levels for each dire
 - Database models and migrations (`models/`, `migrations/`, `schema/`)
 - Configuration (`config/`, `settings/`)
 - Payment/billing code (`payments/`, `billing/`, `checkout/`)
+- **LLM prompts and skills** (see below)
 
 **READ_ONLY** (human only):
 - Security code (`security/`, `crypto/`, `encryption/`)
@@ -43,6 +44,48 @@ Based on the project structure, determine appropriate trust levels for each dire
 - Secret management (`secrets/`, `.env*`)
 - Infrastructure (`infra/`, `terraform/`, `k8s/`)
 - CI/CD pipelines (`.github/workflows/`, `.gitlab-ci.yml`)
+
+### Important: Markdown Files Are Not Always Documentation
+
+**Differentiate between documentation and LLM prompts:**
+
+| Type | Examples | Trust Level |
+|------|----------|-------------|
+| Documentation | `README.md`, `CHANGELOG.md`, `docs/*.md`, `CONTRIBUTING.md` | AUTONOMOUS |
+| LLM Prompts/Skills | `skills/*.md`, `prompts/*.md`, `CLAUDE.md`, `SYSTEM.md`, `agents/*.md` | SUGGEST_ONLY or READ_ONLY |
+| Agent definitions | `.claude/agents/*.md`, `agents/*.yaml` | SUGGEST_ONLY |
+
+**How to identify LLM prompt files:**
+- Located in `skills/`, `prompts/`, `agents/`, `.claude/` directories
+- Named `CLAUDE.md`, `SYSTEM.md`, `PROMPT.md`, or similar
+- Contain instruction patterns like "You are...", "When the user...", "## Instructions"
+- Part of MCP server or AI agent projects
+
+**Example policies for a project with LLM prompts:**
+```yaml
+policies:
+  # Documentation - can edit freely
+  - pattern: "README.md"
+    trust: AUTONOMOUS
+    reason: "Project documentation"
+  - pattern: "docs/**/*.md"
+    trust: AUTONOMOUS
+    reason: "Documentation files"
+
+  # LLM prompts - require review (they control AI behavior)
+  - pattern: "skills/*.md"
+    trust: SUGGEST_ONLY
+    reason: "LLM skill definitions - affects AI behavior"
+  - pattern: "prompts/**"
+    trust: SUGGEST_ONLY
+    reason: "LLM prompts - affects AI behavior"
+  - pattern: "CLAUDE.md"
+    trust: READ_ONLY
+    reason: "Project AI instructions - human controlled"
+  - pattern: ".claude/**"
+    trust: READ_ONLY
+    reason: "Claude Code configuration"
+```
 
 ### Step 3: Initialize with Policies
 
