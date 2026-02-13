@@ -1,0 +1,47 @@
+{
+  "name": "@charzhu/collab-claude-code",
+  "version": "1.0.0",
+  "description": "Human-LLM collaboration tracking for Claude Code - trust boundaries, authorship tracking, and change proposals",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "collab-claude-code": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "skills"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/charzhu/colllab-claude"
+  },
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "collaboration",
+    "anthropic",
+    "llm",
+    "ai",
+    "code-review"
+  ],
+  "author": "charzhu",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "yaml": "^2.3.4",
+    "glob": "^10.3.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}

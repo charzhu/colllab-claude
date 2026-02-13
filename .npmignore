@@ -1,0 +1,25 @@
+# Source files (compiled to dist/)
+src/
+tsconfig.json
+
+# Development files
+*.ts
+!dist/**/*.d.ts
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Test files
+*.test.ts
+*.spec.ts
+__tests__/
+
+# Local development
+node_modules/
+*.log
+.DS_Store
